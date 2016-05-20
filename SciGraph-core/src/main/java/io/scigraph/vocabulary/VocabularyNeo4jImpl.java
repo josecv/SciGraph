@@ -61,6 +61,11 @@ import org.apache.lucene.search.spell.SpellChecker;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.util.Version;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.spans.SpanNearQuery;
+import org.apache.lucene.search.spans.SpanQuery;
+import org.apache.lucene.search.spans.SpanMultiTermQueryWrapper;
+import org.apache.lucene.search.FuzzyQuery;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Node;
 import org.neo4j.graphdb.Result;
@@ -249,16 +254,31 @@ public class VocabularyNeo4jImpl implements Vocabulary {
     return limitHits(hits, query);
   }
 
+  private SpanNearQuery createSpanQuery(String text, String field, float fuzzy) {
+    String[] parts = ("^ " + text + " $").split(" ");
+    SpanQuery[] clauses = new SpanQuery[parts.length];
+    for (int i = 0; i < parts.length; i++) {
+      clauses[i] = new SpanMultiTermQueryWrapper<FuzzyQuery>(
+          new FuzzyQuery(new Term(field, parts[i]), fuzzy));
+    }
+    return new SpanNearQuery(clauses, 0, true);
+  }
+
   @Override
   public List<Concept> getConceptsFromTerm(Query query) {
     QueryParser parser = getQueryParser();
     String exactQuery = String.format("\"\\^ %s $\"", query.getInput());
+    String input = query.getInput().toLowerCase();
     BooleanQuery finalQuery = new BooleanQuery();
+    SpanNearQuery spanQuery = createSpanQuery(input, NodeProperties.LABEL, 0.7f);
     try {
       if (query.isIncludeSynonyms() || query.isIncludeAbbreviations() || query.isIncludeAcronyms()) {
         BooleanQuery subQuery = new BooleanQuery();
         subQuery.add(LuceneUtils.getBoostedQuery(parser, exactQuery, 10.0f), Occur.SHOULD);
+        spanQuery.setBoost(5.0f);
+        subQuery.add(spanQuery, Occur.SHOULD);
         if (query.isIncludeSynonyms()) {
+          //subQuery.add(createSpanQuery(input, Concept.SYNONYM, 0.5f), Occur.SHOULD);
           subQuery.add(parser.parse(Concept.SYNONYM + ":" + exactQuery), Occur.SHOULD);
         }
         if (query.isIncludeAbbreviations()) {
@@ -269,13 +289,15 @@ public class VocabularyNeo4jImpl implements Vocabulary {
         }
         finalQuery.add(subQuery, Occur.MUST);
       } else {
-        finalQuery.add(parser.parse(exactQuery), Occur.MUST);
+        //finalQuery.add(parser.parse(exactQuery), Occur.MUST);
+        finalQuery.add(spanQuery, Occur.MUST);
       }
     } catch (ParseException e) {
       logger.log(Level.WARNING, "Failed to parse query", e);
     }
     addCommonConstraints(finalQuery, query);
     logger.finest(finalQuery.toString());
+    System.out.println(finalQuery.toString());
     try (Transaction tx = graph.beginTx()) {
       IndexHits<Node> hits = graph.index().getNodeAutoIndexer().getAutoIndex().query(finalQuery);
       tx.success();
